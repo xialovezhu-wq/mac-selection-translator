@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import shutil
 from pathlib import Path
 from install import remove_block, FILES
 
@@ -12,14 +13,18 @@ original = init.read_text() if init.exists() else ""
 updated = remove_block(original)
 owned = [args.config_dir / file for file in FILES]
 owned += [args.config_dir / "mac-selection-translator" / file for file in
-          ["dictionary-helper", "build_english_index.py", "english-source.json", "english-index.json"]]
+          ["dictionary-helper", "build_english_index.py", "english-source.json", "english-index.json",
+           "LanguagePreparation.app", "language-preparation.json"]]
 if args.apply:
     # The live module should be stopped first using the command in README.
     if init.exists():
         init.write_text(updated)
     for file in owned:
         if file.exists():
-            file.unlink()
+            if file.is_dir():
+                shutil.rmtree(file)
+            else:
+                file.unlink()
     directory = args.config_dir / "mac-selection-translator"
     if directory.exists() and not any(directory.iterdir()):
         directory.rmdir()

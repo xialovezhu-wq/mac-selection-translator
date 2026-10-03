@@ -163,12 +163,55 @@ local function fail(err, start)
   show("划词助手", errors[err] or "暂时无法读取选区。", "本地提示")
 end
 
+local personalText
+
+local function withPartOfSpeech(body, response, selectedText)
+  local parts = response.partsOfSpeech or {}
+  if #parts > 0 then
+    local label = "词性：" .. table.concat(parts, "／")
+    if response.partOfSpeechSource == "system_tag" then label = label .. "（系统识别）" end
+    return label .. "\n\n" .. body
+  end
+  if response.selectionKind == "word" or (selectedText and selectedText:match("^[A-Za-z][A-Za-z'-]*$")) then
+    return "词性：暂未确认\n\n" .. body
+  end
+  return body
+end
+
+local function renderResponse(selection, response, start, captureMs, ticket, mouse, cached)
+  personal.ensureFresh(function()
+    if ticket ~= generation then return end
+    local app = hs.application.frontmostApplication()
+    if not app or app:pid() ~= selection.pid then return end
+    local entries
+    if not selection.forceSentence then
+      entries = personal.lookup(selection.text)
+      if not entries and response.lookupTerm then entries = personal.lookup(response.lookupTerm) end
+    end
+    local metric = {kind = "translation", state = response.ok and "ok" or response.error,
+      captureMs = captureMs, resultMs = (now() - start) * 1000,
+      engineMs = response.durationMs, engine = response.engine, cached = cached,
+      partOfSpeechAvailable = #(response.partsOfSpeech or {}) > 0}
+    if entries and #entries > 0 then
+      show(selection.text, withPartOfSpeech(personalText(entries), response, selection.text),
+        "我的英语库 · " .. #entries .. " 个语境", mouse)
+      metric.state, metric.engine, metric.matches = "ok", "personal_english", #entries
+    elseif response.ok and type(response.result) == "string" then
+      show(selection.text, withPartOfSpeech(response.result, response, selection.text),
+        response.engine == "apple_dictionary" and "苹果英汉词典 · 离线" or "整句翻译 · 离线", mouse)
+    else
+      show(selection.text, response.message or "本地词典未收录此词。", "本地提示", mouse)
+    end
+    metric.resultMs = (now() - start) * 1000
+    remember(metric)
+  end)
+end
+
 local function translateOffline(selection, start, captureMs, ticket, mouse)
-  local cached = cache.get(selection.text, now())
+  local cacheKey = (selection.forceSentence and "sentence\0" or "lookup\0") .. selection.text
+  local cached = cache.get(cacheKey, now())
   if cached then
-    show(selection.text, cached.result, "本地词典 · 缓存", mouse)
-    remember({kind = "translation", state = "ok", captureMs = captureMs,
-      resultMs = (now() - start) * 1000, engine = cached.engine, cached = true})
+    renderResponse(selection, cached, start, captureMs, ticket, mouse, true)
     return true
   end
   loadingTimer = hs.timer.doAfter(0.08, function()
@@ -187,23 +230,15 @@ local function translateOffline(selection, start, captureMs, ticket, mouse)
       remember({kind = "translation", state = "helper_failed", resultMs = (now() - start) * 1000})
       return
     end
-    if response.ok and type(response.result) == "string" then
-      cache.put(selection.text, response, now())
-      show(selection.text, response.result,
-        response.engine == "apple_dictionary" and "苹果英汉词典 · 离线" or "苹果翻译 · 离线", mouse)
-    else
-      show(selection.text, response.message or "本地词典未收录此词。", "本地提示", mouse)
-    end
-    remember({kind = "translation", state = response.ok and "ok" or response.error,
-      captureMs = captureMs, resultMs = (now() - start) * 1000,
-      engineMs = response.durationMs, engine = response.engine, cached = false})
+    if response.ok then cache.put(cacheKey, response, now()) end
+    renderResponse(selection, response, start, captureMs, ticket, mouse, false)
   end)
   if not task then
     stopTimer(loadingTimer); show("划词助手", "本地词典程序无法启动。", "本地提示"); return false
   end
   helperTask = task
-  task:setInput(hs.json.encode({text = selection.text})):start()
-  timeoutTimer = hs.timer.doAfter(5, function()
+  task:setInput(hs.json.encode({text = selection.text, forceSentence = selection.forceSentence})):start()
+  timeoutTimer = hs.timer.doAfter(15, function()
     if ticket ~= generation then return end
     cancelRequest()
     show(selection.text, "本地查询超时，请缩小选区后重试。", "本地提示", mouse)
@@ -212,7 +247,7 @@ local function translateOffline(selection, start, captureMs, ticket, mouse)
   return true
 end
 
-local function personalText(entries)
+personalText = function(entries)
   local sections = {}
   local function plain(text)
     return (text or ""):gsub("\\n", "\n"):gsub("`", "")
@@ -244,14 +279,13 @@ function M.translate()
     if ticket ~= generation then return end
     local app = hs.application.frontmostApplication()
     if not app or app:pid() ~= selection.pid then return end
-    local entries = personal.lookup(selection.text)
-    if entries and #entries > 0 then
-      show(selection.text, personalText(entries), "我的英语库 · " .. #entries .. " 个语境", mouse)
-      remember({kind = "translation", state = "ok", captureMs = captureMs,
-        resultMs = (now() - start) * 1000, engine = "personal_english", matches = #entries})
-    else
-      translateOffline(selection, start, captureMs, ticket, mouse)
+    local exact = personal.lookup(selection.text)
+    local knownPhrase = exact and #exact > 0
+    if exact then
+      for _,entry in ipairs(exact) do if entry.type ~= "词组" then knownPhrase = false; break end end
     end
+    selection.forceSentence = logic.looksLikeSentence(selection.text) and not knownPhrase
+    translateOffline(selection, start, captureMs, ticket, mouse)
   end)
   return true
 end

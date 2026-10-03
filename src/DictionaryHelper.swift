@@ -1,13 +1,21 @@
 import Foundation
 import CoreServices
 import Translation
+import NaturalLanguage
 
 // One request per process. No query files, history, network client, or shell.
-struct Request: Decodable { let text: String }
+struct Request: Decodable {
+    let text: String
+    let forceSentence: Bool?
+}
 struct Response: Encodable {
     var ok: Bool
     var result: String? = nil
     var engine: String? = nil
+    var lookupTerm: String? = nil
+    var partsOfSpeech: [String]? = nil
+    var partOfSpeechSource: String? = nil
+    var selectionKind: String? = nil
     var error: String? = nil
     var message: String? = nil
     var durationMs: Double = 0
@@ -45,18 +53,104 @@ func chineseGlosses(_ definition: String, word: String) -> String? {
     return glosses.isEmpty ? nil : glosses.joined(separator: "；")
 }
 
-func dictionaryDefinition(_ text: String) -> String? {
-    // Dictionary Services may otherwise return just the first word of a sentence.
+struct DictionaryEntry {
+    let term: String
+    let glosses: String
+    let partsOfSpeech: [String]
+}
+
+private let partOfSpeechNames = [
+    "noun": "名词", "adjective": "形容词", "adverb": "副词",
+    "transitive verb": "及物动词", "intransitive verb": "不及物动词", "verb": "动词",
+    "auxiliary verb": "助动词", "modal verb": "情态动词", "preposition": "介词",
+    "copular verb": "系动词", "article": "冠词", "definite article": "定冠词",
+    "indefinite article": "不定冠词", "infinitive marker": "不定式标记",
+    "pronoun": "代词", "determiner": "限定词", "conjunction": "连词",
+    "exclamation": "感叹词", "interjection": "感叹词", "prefix": "前缀", "suffix": "后缀",
+    "abbreviation": "缩略词"
+]
+
+func dictionaryPartsOfSpeech(_ definition: String) -> [String] {
+    let names = partOfSpeechNames.keys.sorted { $0.count > $1.count }.joined(separator: "|")
+    let pattern = "(?:\\|\\s*|(?:^|\\s)[A-G]\\.\\s*|&\\s*)(" + names + ")\\b"
+    guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else { return [] }
+    var result: [String] = []
+    for match in regex.matches(in: definition, range: NSRange(definition.startIndex..., in: definition)) {
+        guard let range = Range(match.range(at: 1), in: definition),
+              let name = partOfSpeechNames[String(definition[range]).lowercased()],
+              !result.contains(name) else { continue }
+        result.append(name)
+    }
+    return result
+}
+
+func inferredPartsOfSpeech(_ text: String) -> [String] {
+    guard isEnglishWord(text) else { return [] }
+    let tagger = NLTagger(tagSchemes: [.lexicalClass])
+    tagger.string = text
+    tagger.setLanguage(.english, range: text.startIndex..<text.endIndex)
+    let (tag, _) = tagger.tag(at: text.startIndex, unit: .word, scheme: .lexicalClass)
+    let names: [NLTag: String] = [.noun: "名词", .verb: "动词", .adjective: "形容词",
+        .adverb: "副词", .pronoun: "代词", .determiner: "限定词", .particle: "小品词",
+        .preposition: "介词", .conjunction: "连词", .interjection: "感叹词"]
+    return tag.flatMap { names[$0] }.map { [$0] } ?? []
+}
+
+func isEnglishWord(_ text: String) -> Bool {
+    text.range(of: "^[A-Za-z]+(?:[-'’][A-Za-z]+)*$", options: .regularExpression) != nil
+}
+
+func standaloneWord(_ text: String) -> String? {
+    let word = text.trimmingCharacters(in: CharacterSet(charactersIn: "\"“”'‘’()[]{}.,;:!?《》"))
+    return isEnglishWord(word) ? word : nil
+}
+
+func dictionaryHeading(_ definition: String) -> String? {
+    guard let separator = definition.range(of: " | ") else { return nil }
+    let heading = String(definition[..<separator.lowerBound])
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    // Homographs in the installed dictionary use headings such as "box 1".
+    return heading.replacingOccurrences(of: "(?: [0-9]+|[¹²³⁴⁵⁶⁷⁸⁹⁰]+)$", with: "",
+                                         options: .regularExpression)
+}
+
+func inflectionReference(_ definition: String) -> String? {
+    // Native entries for children/went can be grammatical references without
+    // Chinese glosses. Follow only explicitly labelled dictionary inflections.
+    let pattern = "(?:plural|past tense|past participle|present participle|third person singular)\\s*→\\s*([A-Za-z]+(?:[-'’][A-Za-z]+)*)\\b"
+    guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive),
+          let match = regex.firstMatch(in: definition, range: NSRange(definition.startIndex..., in: definition)),
+          let range = Range(match.range(at: 1), in: definition) else { return nil }
+    return String(definition[range])
+}
+
+func dictionaryDefinition(_ text: String) -> DictionaryEntry? {
     guard text.utf16.count <= 160 else { return nil }
-    let cfText = text as CFString
-    let range = DCSGetTermRangeInString(nil, cfText, 0)
-    guard range.location == 0, range.length == text.utf16.count else { return nil }
-    guard let definition = DCSCopyTextDefinition(nil, cfText, range)?.takeRetainedValue() else { return nil }
-    let result = definition as String
-    let heading = result.components(separatedBy: " | ").first?.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard heading?.lowercased() == text.lowercased() else { return nil }
-    // An English definition must never be presented as a Chinese translation.
-    return hasChinese(result) ? chineseGlosses(result, word: text) : nil
+    var query = text
+    var visited: Set<String> = []
+    for _ in 0..<4 {
+        guard visited.insert(query.lowercased()).inserted else { return nil }
+        let cfText = query as CFString
+        let range = DCSGetTermRangeInString(nil, cfText, 0)
+        // Keep the whole-selection check: no sentence-first-word lookup and
+        // never pass a not-found range to DCSCopyTextDefinition.
+        guard range.location == 0, range.length == query.utf16.count else { return nil }
+        guard let definition = DCSCopyTextDefinition(nil, cfText, range)?.takeRetainedValue() else { return nil }
+        let result = definition as String
+        guard let heading = dictionaryHeading(result) else { return nil }
+        // Dictionary Services resolves inflected single words itself (e.g.
+        // idealists -> idealist). Accept that canonical entry rather than
+        // rejecting its title. Phrases still require an identical heading.
+        guard heading.lowercased() == query.lowercased() ||
+                (isEnglishWord(query) && isEnglishWord(heading)) else { return nil }
+        if hasChinese(result), let glosses = chineseGlosses(result, word: query) {
+            return DictionaryEntry(term: heading, glosses: glosses,
+                                   partsOfSpeech: dictionaryPartsOfSpeech(result))
+        }
+        guard isEnglishWord(query), let reference = inflectionReference(result) else { return nil }
+        query = reference
+    }
+    return nil
 }
 
 @main
@@ -96,8 +190,14 @@ struct DictionaryHelper {
             return response
         }
 
-        if let definition = dictionaryDefinition(text) {
-            emit(timed(Response(ok: true, result: definition, engine: "apple_dictionary")))
+        let word = standaloneWord(text)
+        if request.forceSentence != true, let definition = dictionaryDefinition(word ?? text) {
+            let dictionaryPOS = definition.partsOfSpeech
+            let pos = dictionaryPOS.isEmpty ? inferredPartsOfSpeech(word ?? text) : dictionaryPOS
+            emit(timed(Response(ok: true, result: definition.glosses, engine: "apple_dictionary",
+                lookupTerm: definition.term, partsOfSpeech: pos,
+                partOfSpeechSource: dictionaryPOS.isEmpty ? "system_tag" : "dictionary",
+                selectionKind: word != nil ? "word" : "phrase")))
             return
         }
 
@@ -114,7 +214,15 @@ struct DictionaryHelper {
             do {
                 let session = TranslationSession(installedSource: en, target: zh)
                 let response = try await session.translate(text)
-                emit(timed(Response(ok: true, result: response.targetText, engine: "apple_translation")))
+                guard hasChinese(response.targetText) else {
+                    emit(timed(Response(ok: false, error: "no_chinese_translation",
+                        message: "本地引擎没有返回中文释义，请检查选词拼写或连同上下文一起选中。")))
+                    return
+                }
+                let pos = inferredPartsOfSpeech(word ?? text)
+                emit(timed(Response(ok: true, result: response.targetText, engine: "apple_translation",
+                    partsOfSpeech: pos, partOfSpeechSource: "system_tag",
+                    selectionKind: request.forceSentence != true && word != nil ? "word" : "sentence")))
             } catch {
                 emit(timed(Response(ok: false, error: "translation_failed",
                     message: "苹果离线翻译暂时不可用，请检查已下载的英中语言包。")))

@@ -16,6 +16,16 @@ function M.hasChinese(text)
   return false
 end
 
+function M.looksLikeSentence(text)
+  local words = {}
+  for word in text:gmatch("%S+") do words[#words + 1] = word end
+  if #words <= 1 then return false end
+  if text:find("[.!?。！？]") or #words >= 5 then return true end
+  local first = words[1]:lower()
+  return first == "i" or first == "you" or first == "he" or first == "she"
+    or first == "we" or first == "they" or first == "it"
+end
+
 function M.shorten(text, length)
   if (utf8.len(text) or 0) <= length then return text end
   return text:sub(1, utf8.offset(text, length + 1) - 1) .. "…"

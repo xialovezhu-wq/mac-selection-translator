@@ -59,6 +59,9 @@ def install(config_dir, apply, english_root=None):
     targets = [init] + [config_dir / file for file in FILES]
     private_dir = config_dir / "mac-selection-translator"
     targets += [private_dir / "dictionary-helper", private_dir / "build_english_index.py"]
+    preparation_app = PROJECT / "build/LanguagePreparation.app"
+    if preparation_app.is_dir():
+        targets.append(private_dir / "LanguagePreparation.app")
     source = english_root.resolve() / "bank/master_bank.csv" if english_root else None
     if source and source.is_file():
         targets += [private_dir / "english-source.json", private_dir / "english-index.json"]
@@ -77,8 +80,11 @@ def install(config_dir, apply, english_root=None):
         if existed:
             saved = backup / relative
             saved.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(target, saved)
-            saved.chmod(0o600)
+            if target.is_dir():
+                shutil.copytree(target, saved)
+            else:
+                shutil.copy2(target, saved)
+                saved.chmod(0o600)
     (backup / "manifest.json").write_text(json.dumps(manifest, indent=2))
     for file in FILES:
         shutil.copy2(PROJECT / "hammerspoon" / file, config_dir / file)
@@ -86,6 +92,11 @@ def install(config_dir, apply, english_root=None):
     shutil.copy2(binary, private_dir / "dictionary-helper")
     (private_dir / "dictionary-helper").chmod(0o755)
     shutil.copy2(PROJECT / "scripts/build_english_index.py", private_dir / "build_english_index.py")
+    if preparation_app.is_dir():
+        installed_app = private_dir / "LanguagePreparation.app"
+        if installed_app.exists():
+            shutil.rmtree(installed_app)
+        shutil.copytree(preparation_app, installed_app)
     if source and source.is_file():
         config = {"source": str(source), "python": sys.executable}
         config_path = private_dir / "english-source.json"
