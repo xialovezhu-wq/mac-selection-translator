@@ -6,8 +6,11 @@
 |---|---|
 | 查询选中文字 | Control + Option + Command + T（⌃⌥⌘T） |
 | 朗读选中文字 | Control + Option + Command + R（⌃⌥⌘R） |
+| 声音、口音与语速设置 | Control + Option + Command + S（⌃⌥⌘S，未冲突时注册） |
 
 先用鼠标选中词，再按快捷键。按 Esc、点击浮窗外部或点击 × 收起浮窗。长记录可在浮窗中滚动。朗读同一个词时再按一次朗读键可停止；选中另一个词则改读新词。
+
+朗读现在使用独立的 AVSpeechSynthesizer helper，支持英音、美音、具体音色与语速保存，核对实际声音并提示同口音回退。等待中也可取消，快速换词只处理最后一个请求。[朗读设置、验证与回滚](docs/SPEECH.md)。
 
 ![复数选词显示词性和中文释义](docs/screenshots/idealists.png)
 
@@ -94,6 +97,8 @@ python3 scripts/uninstall.py --apply
 
 - `src/DictionaryHelper.swift`：苹果英汉词典及已安装的苹果离线翻译。
 - `src/LanguagePreparation.swift`：官方离线语言准备窗口。
+- `src/SpeechEngine.swift`、`SpeechHelper.swift`、`SpeechSettings.swift`：本地声音枚举、播放、停止与中文设置。
+- `hammerspoon/selection_speech.lua`、`speech_logic.lua`：朗读请求队列、偏好、取消和状态。
 - `hammerspoon/selection_translator.lua`：全局热键、选区读取、浮窗与语音。
 - `hammerspoon/english_lookup.lua`：个人库查询及变更刷新。
 - `scripts/build_english_index.py`：只读正式 CSV，原子生成私有索引。

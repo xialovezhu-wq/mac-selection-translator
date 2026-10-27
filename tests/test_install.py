@@ -32,6 +32,25 @@ class InstallTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 installer.remove_block(text)
 
+    def test_speech_only_preserves_config_translation_and_personal_data(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory)
+            assets = config / "mac-selection-translator"
+            assets.mkdir()
+            preserved = {"init.lua": "-- original unrelated shortcuts\n",
+                         "selection_logic.lua": "-- selection logic\n",
+                         "english_lookup.lua": "-- English lookup\n",
+                         "mac-selection-translator/dictionary-helper": "original binary",
+                         "mac-selection-translator/english-index.json": "private fixture",
+                         "mac-selection-translator/speech-preferences.json": '{"englishAccent":"en-GB"}'}
+            for name, data in preserved.items(): (config / name).write_text(data)
+            installer.install(config, True, speech_only=True)
+            for name, data in preserved.items(): self.assertEqual((config / name).read_text(), data)
+            backup = next((config / "backups").iterdir())
+            import json
+            paths = {row["path"] for row in json.loads((backup / "manifest.json").read_text())}
+            self.assertEqual(paths, {"selection_translator.lua", "selection_speech.lua", "speech_logic.lua", "mac-selection-translator/SpeechHelper.app"})
+
 
 if __name__ == "__main__":
     unittest.main()

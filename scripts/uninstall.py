@@ -15,6 +15,8 @@ owned = [args.config_dir / file for file in FILES]
 owned += [args.config_dir / "mac-selection-translator" / file for file in
           ["dictionary-helper", "build_english_index.py", "english-source.json", "english-index.json",
            "LanguagePreparation.app", "language-preparation.json"]]
+owned += [args.config_dir / "mac-selection-translator" / file for file in
+          ["SpeechHelper.app", "speech-command.json", "speech-status.json", "speech-progress.json", "speech-settings-window.json"]]
 if args.apply:
     # The live module should be stopped first using the command in README.
     if init.exists():

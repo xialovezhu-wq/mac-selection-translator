@@ -1,11 +1,12 @@
 local M = {}
 local logic = require("selection_logic")
 local englishLookup = require("english_lookup")
+local speechModule = require("selection_speech")
 local personal
 local hotkeys, canvas, tap, appWatcher = {}, nil, nil, nil
 local helper, helperTask, timeoutTimer, loadingTimer, closeTimer, warmTask
-local generation, running, panelData, spokenText = 0, false, nil, nil
-local speechEN, speechZH, speechStarted, speechTicket = nil, nil, nil, 0
+local generation, running, panelData = 0, false, nil
+local speech, settingsHotkey
 local cache = logic.cache(128, 300)
 local last, history = {}, {}
 local MODS = { "ctrl", "alt", "cmd" }
@@ -295,47 +296,30 @@ function M.read()
   local start = now()
   local selection, err = capture()
   if not selection then fail(err, start); return false end
-  local wasSpeaking = (speechEN and speechEN:isSpeaking()) or (speechZH and speechZH:isSpeaking())
-  speechTicket = speechTicket + 1
-  if speechEN then speechEN:stop() end
-  if speechZH then speechZH:stop() end
-  if wasSpeaking and spokenText == selection.text then
-    spokenText = nil
-    remember({kind = "speech", state = "stopped", elapsedMs = (now() - start) * 1000})
-    return true
-  end
-  spokenText, speechStarted = selection.text, start
-  local speaker = logic.hasChinese(selection.text) and speechZH or speechEN
-  if not speaker then fail("speech_unavailable", start); return false end
-  local ticket, first = speechTicket, true
-  local metric = {kind = "speech", state = "starting", captureMs = (now() - start) * 1000}
-  remember(metric)
-  speaker:setCallback(function(_, event, completed)
-    if ticket ~= speechTicket then return end
-    if event == "willSpeakWord" and first then
-      first = false; metric.state = "speaking"; metric.speechStartMs = (now() - start) * 1000
-    elseif event == "didEncounterError" then metric.state = "speech_failed"
-    elseif event == "didFinish" then metric.state = completed and "finished" or "stopped" end
-  end)
-  -- NSSpeechSynthesizer has embedded [[commands]]; selected text stays data.
-  local spoken = selection.text:gsub("%[%[.-%]%]", " ")
-  speaker:speak(spoken)
-  return true
+  -- Use the selection itself, never the dictionary's canonical lookup term.
+  return speech.toggle(selection.text)
 end
 
-local function chooseVoice(language, preferred)
-  local available = hs.speech.availableVoices()
-  for _, voice in ipairs(available) do if voice == preferred then return hs.speech.new(voice) end end
-  for _, voice in ipairs(available) do
-    if voice:find(language, 1, true) and not voice:find("eloquence", 1, true) then return hs.speech.new(voice) end
-  end
-  return hs.speech.new()
+function M.openSpeechSettings()
+  return speech and speech.openSettings() or false
+end
+
+function M.speechPreferences(value)
+  if not speech then return false end
+  if value then return speech.setPreferences(value) end
+  return speech.status().preferences
+end
+
+function M.stopSpeech()
+  if speech then speech.stopAudio() end
 end
 
 function M.status()
   local out = {running = running, popupVisible = canvas ~= nil, cacheEntries = cache.size(),
     last = last, recent = history, helperAvailable = helper and hs.fs.attributes(helper) ~= nil or false}
   if personal then out.englishLibrary = personal.status() end
+  if speech then out.speech = speech.status() end
+  out.speechSettingsShortcut = settingsHotkey ~= nil and "Ctrl+Option+Command+S" or nil
   if panelData then
     out.panel = {frame = panelData.frame, hasChinese = panelData.hasChinese,
       lines = #panelData.lines, offset = panelData.offset, visibleLines = panelData.visibleLines}
@@ -364,10 +348,26 @@ function M.start(options)
     if not key or not key:enable() then M.stop(); return false, "hotkey_registration_failed" end
     hotkeys[#hotkeys + 1] = key
   end
-  speechEN = chooseVoice("en-US", "com.apple.voice.compact.en-US.Samantha")
-  speechZH = chooseVoice("zh-CN", "com.apple.voice.compact.zh-CN.Tingting")
-  if speechEN then speechEN:rate(185) end
-  if speechZH then speechZH:rate(185) end
+  speech = speechModule.new({directory=hs.configdir .. "/mac-selection-translator",
+    onStatus=function(state)
+      remember({kind="speech",state=state.phase,engine=state.engine,requestId=state.requestId,
+        voice=state.actualVoice,rate=state.rate,speechStartMs=state.startMs,error=state.error,
+        fallbackReason=state.fallbackReason})
+    end,
+    notice=function(message)
+      local screen=speechModule.workScreen()
+      if screen then hs.alert.show(message,{textSize=15},screen,5) end
+    end})
+  local settingsAvailable=hs.hotkey.assignable(MODS,"s")
+  for _,bound in ipairs(hs.hotkey.getHotkeys()) do
+    local idx=bound.idx
+    if idx:sub(-1)=="S" and idx:find("⌘",1,true) and idx:find("⌃",1,true)
+      and idx:find("⌥",1,true) and not idx:find("⇧",1,true) then settingsAvailable=false end
+  end
+  if settingsAvailable then
+    local key=hs.hotkey.new(MODS,"s",M.openSpeechSettings)
+    if key and key:enable() then settingsHotkey=key elseif key then key:delete() end
+  end
   tap = hs.eventtap.new({hs.eventtap.event.types.keyDown, hs.eventtap.event.types.leftMouseDown,
     hs.eventtap.event.types.rightMouseDown, hs.eventtap.event.types.scrollWheel}, function(event)
     if not canvas or not panelData then return false end
@@ -403,17 +403,17 @@ function M.start(options)
 end
 
 function M.stop()
-  running = false; speechTicket = speechTicket + 1
+  running = false
   M.dismiss()
   for _, key in ipairs(hotkeys) do key:delete() end
   hotkeys = {}
   if appWatcher then appWatcher:stop(); appWatcher = nil end
   if tap then tap:stop(); tap = nil end
-  if speechEN then speechEN:stop(); speechEN = nil end
-  if speechZH then speechZH:stop(); speechZH = nil end
+  if speech then speech.dispose(); speech = nil end
+  if settingsHotkey then settingsHotkey:delete(); settingsHotkey=nil end
   if warmTask then warmTask:setCallback(nil):terminate(); warmTask = nil end
   if personal then personal.stop(); personal = nil end
-  cache.clear(); spokenText = nil
+  cache.clear()
 end
 
 return M

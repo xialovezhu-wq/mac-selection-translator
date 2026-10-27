@@ -29,3 +29,4 @@ cat > "$preparation_app/Contents/Info.plist" <<'PLIST'
 PLIST
 codesign --force --sign - "$preparation_app"
 echo "Built $preparation_app"
+bash "$project_dir/scripts/build_speech.sh"
